@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     system_prompt: str = "Ты - полезный универсальный ассистент. Отвечай по-русски, кратко и по делу, без вступлений и извинений."
 
-    HOST: str = "0.0.0.0"
+    HOST: str = "127.0.0.1"
     PORT: int = 8002
 
     @property
