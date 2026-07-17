@@ -40,11 +40,14 @@ async def set_feedback(
     )
     stmt = stmt.on_conflict_do_update(
         index_elements=[Feedback.message_id],
-        set_={"payload": stmt.excluded.payload, "updated_at": func.now()},
-    )
-    await s.execute(stmt)
+        set_={
+            "payload": Feedback.payload.op("||")(stmt.excluded.payload),
+            "updated_at": func.now(),
+        },
+    ).returning(Feedback.payload)
+    merged_payload = (await s.execute(stmt)).scalar_one()
     await s.commit()
-    return {"message_id": str(message_id), "payload": payload}
+    return {"message_id": str(message_id), "payload": merged_payload}
 
 
 @router.get("/{message_id}/feedback")
@@ -65,9 +68,8 @@ async def get_feedback(
     }
 
 
-@router.delete(
-    "/{message_id}/feedback", status_code=status.HTTP_204_NO_CONTENT
-)
+@router.delete("/{message_id}/feedback", 
+               status_code=status.HTTP_204_NO_CONTENT)
 async def delete_feedback(
     message_id: UUID,
     uid: UUID = Depends(user_id),
