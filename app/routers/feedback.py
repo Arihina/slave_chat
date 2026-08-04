@@ -9,16 +9,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
 from ..deps import user_id
-from ..models import ChatSession, Feedback, Message
+from ..models import Feedback, Message
 
-router = APIRouter(prefix="/messages", tags=["feedback"])
+router = APIRouter(
+    prefix="/v1/chat/completions/{completion_id}/feedback", tags=["feedback"])
+
+
+def _parse_completion_id(completion_id: str) -> UUID:
+    raw = completion_id.removeprefix("chatcmpl-")
+    try:
+        return UUID(raw)
+    except ValueError:
+        raise HTTPException(422, "Некорректный id completion'а")
 
 
 async def _ensure_owns(s: AsyncSession, message_id: UUID, uid: UUID) -> None:
     owns = await s.scalar(
-        select(Message.id)
-        .join(ChatSession, ChatSession.id == Message.session_id)
-        .where(Message.id == message_id, ChatSession.user_id == uid)
+        select(Message.id).where(Message.id ==
+                                 message_id, Message.user_id == uid)
     )
     if not owns:
         raise HTTPException(
@@ -26,13 +34,14 @@ async def _ensure_owns(s: AsyncSession, message_id: UUID, uid: UUID) -> None:
         )
 
 
-@router.post("/{message_id}/feedback")
+@router.post("")
 async def set_feedback(
-    message_id: UUID,
+    completion_id: str,
     payload: dict = Body(...),
     uid: UUID = Depends(user_id),
     s: AsyncSession = Depends(get_session),
 ) -> dict:
+    message_id = _parse_completion_id(completion_id)
     await _ensure_owns(s, message_id, uid)
 
     stmt = pg_insert(Feedback).values(
@@ -50,12 +59,13 @@ async def set_feedback(
     return {"message_id": str(message_id), "payload": merged_payload}
 
 
-@router.get("/{message_id}/feedback")
+@router.get("")
 async def get_feedback(
-    message_id: UUID,
+    completion_id: str,
     uid: UUID = Depends(user_id),
     s: AsyncSession = Depends(get_session),
 ) -> dict:
+    message_id = _parse_completion_id(completion_id)
     await _ensure_owns(s, message_id, uid)
     obj = await s.get(Feedback, message_id)
     if obj is None:
@@ -68,13 +78,13 @@ async def get_feedback(
     }
 
 
-@router.delete("/{message_id}/feedback", 
-               status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_feedback(
-    message_id: UUID,
+    completion_id: str,
     uid: UUID = Depends(user_id),
     s: AsyncSession = Depends(get_session),
 ) -> None:
+    message_id = _parse_completion_id(completion_id)
     await _ensure_owns(s, message_id, uid)
     result = await s.execute(
         delete(Feedback).where(Feedback.message_id == message_id)
