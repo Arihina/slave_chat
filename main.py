@@ -11,7 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.config import settings
 from app.db import dispose_engine, init_engine
 from app.ollama import OllamaClient
-from app.routers import chat, conversations, feedback
+from app.routers import chat, conversations, feedback, responses
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,6 +37,7 @@ app = FastAPI(title="Chat Agent", version="2.0.0", lifespan=lifespan)
 
 app.include_router(conversations.router)
 app.include_router(chat.router)
+app.include_router(responses.router)
 app.include_router(feedback.router)
 
 

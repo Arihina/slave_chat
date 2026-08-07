@@ -16,11 +16,16 @@ router = APIRouter(
 
 
 def _parse_completion_id(completion_id: str) -> UUID:
-    raw = completion_id.removeprefix("chatcmpl-")
+    raw = completion_id
+    
+    for prefix in ("chatcmpl-", "resp_"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+            break
     try:
         return UUID(raw)
     except ValueError:
-        raise HTTPException(422, "Некорректный id completion'а")
+        raise HTTPException(422, "Некорректный id сообщения")
 
 
 async def _ensure_owns(s: AsyncSession, message_id: UUID, uid: UUID) -> None:
