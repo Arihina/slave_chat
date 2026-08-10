@@ -6,6 +6,9 @@ from typing import AsyncIterator
 import httpx
 
 
+DEFAULT_OPTIONS = {"temperature": 0.6}
+
+
 class OllamaError(Exception):
     """Ошибки связи с Ollama или нестандартный ответ."""
 
@@ -18,20 +21,13 @@ class OllamaClient:
         await self._client.aclose()
 
     async def stream_chat(
-        self, messages: list[dict], model: str
+        self, messages: list[dict], model: str, options: dict | None = None
     ) -> AsyncIterator[dict]:
-        """
-        Ollama /api/chat в режиме stream=true отдаёт NDJSON.
-        Каждая строка — JSON-объект с полем `message.content` (дельта)
-        и финальным флагом `done: true` с метриками.
-        """
         payload = {
             "model": model,
             "messages": messages,
             "stream": True,
-            "options": {
-                "temperature": 0.6
-            },
+            "options": {**DEFAULT_OPTIONS, **(options or {})},
         }
         try:
             async with self._client.stream("POST", "/api/chat", json=payload) as resp:

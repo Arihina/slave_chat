@@ -51,8 +51,8 @@ JWT валидирует мастер-агент; сервис доверяет 
 
 | Ситуация | Код |
 |----------|-----|
-| Заголовок `X-User-Id` отсутствует | `422` |
-| `X-User-Id` не является валидным UUID | `400` |
+| Заголовок `X-User-Id` отсутствует | `401` |
+| `X-User-Id` не является валидным UUID | `401` |
 | Обращение к чужому completion'у/response'у, чату (`conversation`) или фидбэку | `404` |
 
 Возврат `404` (а не `403`) для чужих объектов сознателен: сервис не подтверждает их существование.
@@ -202,12 +202,22 @@ data: [DONE]
 
 ---
 
+**Параметры OpenAI, которые сервис учитывает** (обе формы): `model`, `stream`, `stream_options.include_usage`, `temperature`, `top_p`, `max_tokens` / `max_completion_tokens` (в Responses — `max_output_tokens`), `store`, `n` (только `1` — другое значение отклоняется с `400`, а не игнорируется молча). Сообщения с `role: "system"` / `"developer"` добавляются к системному промпту сервиса как дополнительные инструкции — они уточняют поведение, но не заменяют его. `content` принимается и строкой, и массивом частей.
+
+**Не поддерживаются** (молча игнорируются): `tools`, `tool_choice`, `response_format`, `seed`, `logprobs`, `logit_bias`, `presence_penalty`, `frequency_penalty`, `stop`, `user`, `service_tier`.
+
+Температура по умолчанию (`0.6`) задана в `app/ollama.py` и применяется, только если клиент не прислал свою.
+
 ### `POST /v1/responses`
 
 Генерация ответа, форма Responses API. Два режима в зависимости от того, передан ли `conversation_id`:
 
+> Поле в спецификации называется `conversation` (строка или `{"id": ...}`) — сервис принимает его, а `conversation_id` оставлен алиасом для фронта платформы. Поддерживается и стандартный `previous_response_id`: сервис находит предыдущий ответ и берёт чат, которому тот принадлежал; неизвестный или чужой id → `404`.
+>
+> Учитываются также `instructions`, `temperature`, `top_p`, `max_output_tokens`, `store`. Не поддерживаются: `tools`, `text.format`, `reasoning`, `include`, `background`, `truncation`.
+
 - **Без `conversation_id`** — stateless: `input` должен содержать всё, что нужно модели (аналог `messages[]`).
-- **С `conversation_id`** — `input` должен содержать **только новый ход**. Сервис сам читает последние `history_limit` сообщений этого чата из БД (`app/config.py`, по умолчанию 10) и подставляет их как историю. Системный промпт добавляется так же, как в форме Chat Completions. Если клиент всё равно пришлёт историю в `input` вместе с `conversation_id` — `422`:
+- **С `conversation_id`** — `input` должен содержать **только новый ход**. Сервис сам читает последние `history_limit` сообщений этого чата из БД (`app/config.py`, по умолчанию 10) и подставляет их как историю. Системный промпт добавляется так же, как в форме Chat Completions. Если клиент всё равно пришлёт историю в `input` вместе с `conversation_id` — `400`. Это сознательное отступление от спецификации OpenAI (там `conversation` вместе с многоходовым `input` допустим — история просто дополняется): предпочитаем явную ошибку риску удвоить контекст.
   ```json
   {"error": {"message": "При переданном conversation_id input должен содержать только новый ход (без истории) — история собирается агентом из БД по conversation_id", ...}}
   ```
@@ -383,13 +393,21 @@ data: {"type":"response.completed","sequence_number":N,"response":{"id":"resp_..
 { "status": "ok", "model": "qwen3.6:35b" }
 ```
 
+### `DELETE /v1/chat/completions/{id}` и `DELETE /v1/responses/{id}`
+
+Удаляют сообщение ассистента вместе с его фидбэком (каскад по FK) и отдают `{"id": ..., "object": "chat.completion.deleted" | "response.deleted", "deleted": true}`. Реплика пользователя, вызвавшая этот ответ, **остаётся** в чате: id адресует именно объект completion/response, а связи «ответ → вопрос» в схеме нет — сообщения связаны только чатом и порядком `created_at`. Чтобы убрать оба сообщения, удаляйте чат целиком через `/v1/platform/conversations/{id}`.
+
+Чужой или несуществующий id → `404` (сервис не подтверждает существование чужих объектов).
+
 ## Ошибки
 
 Единый формат вместо FastAPI-дефолта `{"detail": ...}`:
 ```json
 {"error": {"message": "...", "type": "invalid_request_error", "param": null, "code": null}}
 ```
-`type` — грубая классификация по HTTP-статусу: `400/413/415/422` → `invalid_request_error`, `401` → `authentication_error`, `404` → `not_found_error`, остальное → `server_error`. Ошибки соединения с Ollama во время генерации — до первого чанка `502`, в середине уже начатого стрима — `data: {"error": {...}}` перед завершением потока.
+`type` — грубая классификация по HTTP-статусу: `400/413/415/422` → `invalid_request_error`, `401` → `authentication_error`, `404` → `not_found_error`, остальное → `server_error`.
+
+Невалидное тело запроса — **`400`**, а не `422`: OpenAI отвечает на такие запросы именно `400`, а SDK мапит `422` в `UnprocessableEntityError`, мимо клиентского `except BadRequestError`. Поле `param` заполняется путём до проблемного поля (`messages.0.role`), а не остаётся `null`. Ошибки соединения с Ollama во время генерации — до первого чанка `502`, в середине уже начатого стрима — `data: {"error": {...}}` перед завершением потока.
 
 ## Примеры curl
 
@@ -453,7 +471,7 @@ curl -X DELETE $BASE/v1/platform/conversations/$CID -H "X-User-Id: $U"
 
 # ============ ошибки ============
 
-# conversation_id + история в input одновременно (форма Responses) -> 422
+# conversation_id + история в input одновременно (форма Responses) -> 400
 curl -X POST $BASE/v1/responses \
   -H "X-User-Id: $U" -H "Content-Type: application/json" \
   -d "{\"model\": \"chat\", \"conversation_id\": \"$CID\", \"input\": [
