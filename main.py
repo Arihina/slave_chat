@@ -11,6 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.config import settings
 from app.db import dispose_engine, init_engine
 from app.ollama import OllamaClient
+from app.tokens import make_counter
 from app.routers import chat, conversations, feedback, responses
 
 logging.basicConfig(
@@ -22,10 +23,13 @@ logging.basicConfig(
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_engine()
+    
     app.state.ollama = OllamaClient(
         base_url=settings.ollama_base_url,
         timeout=settings.ollama_timeout,
     )
+
+    app.state.counter = make_counter(settings.tokenizer_repo)
     try:
         yield
     finally:
@@ -89,7 +93,7 @@ async def _validation_exception_handler(request: Request, exc: RequestValidation
     first = exc.errors()[0] if exc.errors() else {}
     message = first.get("msg", "Некорректный запрос")
     param = _param_from_loc(first.get("loc", ()))
-    
+
     return JSONResponse(
         status_code=_VALIDATION_STATUS,
         content=_error_body(_VALIDATION_STATUS, message, param),
