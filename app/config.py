@@ -12,8 +12,11 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_timeout: float = 180
 
-    history_limit: int = 10
-
+    context_window: int = 8192
+    reserve_output_tokens: int = 1024
+    context_safety_tokens: int = 64
+    history_max_messages: int = 200
+    tokenizer_repo: str | None = None
 
     system_prompt: str = "Ты - полезный универсальный ассистент. Отвечай по-русски, кратко и по делу, без вступлений и извинений."
 
