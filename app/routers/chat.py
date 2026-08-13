@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
+from ..context import build_window, message_tokens
 from ..db import get_session, session_factory
 from ..deps import user_id as get_user_id
 from ..models import Conversation, Message
@@ -72,11 +73,13 @@ def _extract(body: dict) -> dict:
         "include_usage": bool(stream_options.get("include_usage", False)),
         "store": bool(body.get("store", True)),
         "conversation_id_raw": body.get("conversation_id"),
+        "max_tokens": body.get("max_completion_tokens", body.get("max_tokens")),
         "options": sampling_options(
             temperature=body.get("temperature"),
             top_p=body.get("top_p"),
             max_tokens=body.get("max_completion_tokens",
                                 body.get("max_tokens")),
+            num_ctx=settings.context_window,
         ),
     }
 
@@ -90,6 +93,7 @@ def _system_prompt(instructions: str | None) -> str:
 
 async def _open_turn(
     uid: UUID, conversation_id: UUID | None, question: str, store: bool,
+    tokens: int | None = None,
 ) -> None:
     factory = session_factory()
     async with factory() as s, s.begin():
@@ -103,7 +107,7 @@ async def _open_turn(
             return
 
         s.add(Message(user_id=uid, conversation_id=conversation_id,
-                      role="user", content=question))
+                      role="user", content=question, tokens=tokens))
 
         if conv is not None:
             conv.updated_at = datetime.now(timezone.utc)
@@ -115,6 +119,7 @@ async def _open_turn(
 async def _persist_assistant(
     uid: UUID, conversation_id: UUID | None, assistant_id: UUID, content: str,
     model: str, prompt_tokens: int | None, completion_tokens: int | None,
+    tokens: int | None = None,
 ) -> None:
     if not content:
         return
@@ -124,6 +129,7 @@ async def _persist_assistant(
             id=assistant_id, user_id=uid, conversation_id=conversation_id,
             role="assistant", content=content, model=model,
             prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            tokens=tokens,
         ))
 
 
@@ -143,18 +149,27 @@ async def chat_completions(
         except ValueError:
             raise HTTPException(400, "conversation_id должен быть UUID")
 
-    await _open_turn(uid, conversation_id, req["question"], req["store"])
+    counter = request.app.state.counter
+    await _open_turn(
+        uid, conversation_id, req["question"], req["store"],
+        tokens=message_tokens("user", req["question"], counter),
+    )
 
     assistant_id = uuid4()
     completion_id = f"chatcmpl-{assistant_id}"
     created = int(time.time())
     conversation_id_str = str(conversation_id) if conversation_id else None
 
-    messages_payload = [
-        {"role": "system", "content": _system_prompt(req["instructions"])},
-        *req["history"],
-        {"role": "user", "content": req["question"]},
-    ]
+    messages_payload, stats = build_window(
+        system=_system_prompt(req["instructions"]),
+        history=req["history"],
+        question=req["question"],
+        counter=counter,
+        num_ctx=settings.context_window,
+        reserve_output=req["max_tokens"] or settings.reserve_output_tokens,
+        safety=settings.context_safety_tokens,
+    )
+    log.info("окно контекста: %s", stats.as_log())
 
     ollama: OllamaClient = request.app.state.ollama
 
@@ -177,8 +192,11 @@ async def chat_completions(
         full_answer = "".join(buf)
 
         if req["store"]:
-            await _persist_assistant(uid, conversation_id, assistant_id, full_answer,
-                                     model, prompt_tokens, completion_tokens)
+            await _persist_assistant(
+                uid, conversation_id, assistant_id, full_answer, model,
+                prompt_tokens, completion_tokens,
+                tokens=message_tokens("assistant", full_answer, counter),
+            )
 
         return completion_object(
             completion_id, created, model, conversation_id_str, full_answer,
@@ -217,16 +235,22 @@ async def chat_completions(
             yield DONE
 
             if req["store"]:
-                await _persist_assistant(uid, conversation_id, assistant_id,
-                                         "".join(buf), model,
-                                         prompt_tokens, completion_tokens)
+                answer = "".join(buf)
+                await _persist_assistant(
+                    uid, conversation_id, assistant_id, answer, model,
+                    prompt_tokens, completion_tokens,
+                    tokens=message_tokens("assistant", answer, counter),
+                )
 
         except asyncio.CancelledError:
             partial = "".join(buf)
             if partial and req["store"]:
                 try:
-                    await _persist_assistant(uid, conversation_id, assistant_id,
-                                             partial, model, None, None)
+                    await _persist_assistant(
+                        uid, conversation_id, assistant_id, partial, model,
+                        None, None,
+                        tokens=message_tokens("assistant", partial, counter),
+                    )
                 except Exception:
                     log.exception("не удалось сохранить частичный ответ")
             raise

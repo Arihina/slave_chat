@@ -37,8 +37,13 @@ def collect_instructions(items: list, text_types: Iterable[str]) -> str | None:
     return joined or None
 
 
-def sampling_options(temperature=None, top_p=None, max_tokens=None) -> dict:
+def sampling_options(
+    temperature=None, top_p=None, max_tokens=None, num_ctx=None
+) -> dict:
     options: dict = {}
+
+    if num_ctx is not None:
+        options["num_ctx"] = num_ctx
 
     if temperature is not None:
         options["temperature"] = _number("temperature", temperature)
