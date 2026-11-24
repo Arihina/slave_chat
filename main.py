@@ -11,6 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from app.config import settings
 from app.db import dispose_engine, init_engine
 from app.ollama import OllamaClient
+from app.platform_security import install_internal_auth
 from app.tokens import make_counter
 from app.routers import chat, conversations, feedback, responses
 
@@ -20,8 +21,20 @@ logging.basicConfig(
 )
 
 
+def _validate_bind() -> None:
+    """На хосте агент не должен слушать 0.0.0.0 (см. docs/agent-side-changes.md 6.5)."""
+    if settings.HOST == "0.0.0.0" and not settings.allow_public_bind:
+        raise RuntimeError(
+            "HOST=0.0.0.0 на хосте запрещён: это публикует агента наружу. "
+            "Используйте 127.0.0.1 или явно задайте ALLOW_PUBLIC_BIND=true."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings.validate_internal_auth()
+    _validate_bind()
+
     await init_engine()
     
     app.state.ollama = OllamaClient(
@@ -37,7 +50,18 @@ async def lifespan(app: FastAPI):
         await dispose_engine()
 
 
-app = FastAPI(title="Chat Agent", version="2.0.0", lifespan=lifespan)
+_prod = settings.is_prod
+
+app = FastAPI(
+    title="Chat Agent",
+    version="2.0.0",
+    lifespan=lifespan,
+    docs_url=None if _prod else "/docs",
+    redoc_url=None if _prod else "/redoc",
+    openapi_url=None if _prod else "/openapi.json",
+)
+
+install_internal_auth(app, settings)
 
 app.include_router(conversations.router)
 app.include_router(chat.router)
@@ -45,9 +69,10 @@ app.include_router(responses.router)
 app.include_router(feedback.router)
 
 
-@app.get("/healthz", tags=["health"])
-async def healthz() -> dict:
-    return {"status": "ok", "model": settings.ollama_model}
+@app.get("/health", tags=["health"])
+async def health() -> dict:
+    """Публичный liveness без обращения к БД/LLM и без деталей о зависимостях."""
+    return {"status": "ok"}
 
 
 _ERROR_TYPES = {
